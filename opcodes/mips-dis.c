@@ -20,7 +20,7 @@
    MA 02110-1301, USA.  */
 
 #include "sysdep.h"
-#include "disassemble.h"
+#include "dis-asm.h"
 #include "libiberty.h"
 #include "opcode/mips.h"
 #include "opintl.h"
@@ -390,6 +390,16 @@ static const struct mips_cp0sel_name mips_cp0sel_names_xlr[] = {
   { 29, 1, "c0_datahi"          }
 };
 
+static const char * const mips_cp0_names_rsp[32] =
+{
+  "c0_SP_MEM_ADDR_REG",	"c0_SP_DRAM_ADDR_REG",	"c0_SP_RD_LEN_REG",	"c0_SP_WR_LEN_REG",
+  "c0_SP_STATUS_REG",	"c0_SP_DMA_FULL_REG",	"c0_SP_DMA_BUSY_REG",	"c0_SP_SEMAPHORE_REG",
+  "c0_DPC_START_REG",	"c0_DPC_END_REG",	"c0_DPC_CURRENT_REG",	"c0_DPC_STATUS_REG",
+  "c0_DPC_CLOCK_REG",	"c0_DPC_BUFBUSY_REG",	"c0_DPC_PIPEBUSY_REG",	"c0_DPC_TMEM_REG",
+  "$16", "$17", "$18", "$19", "$20", "$21", "$22", "$23",
+  "$24", "$25", "$26", "$27", "$28", "$29", "$30", "$31"
+};
+
 static const char * const mips_hwr_names_numeric[32] =
 {
   "$0",   "$1",   "$2",   "$3",   "$4",   "$5",   "$6",   "$7",
@@ -663,6 +673,10 @@ const struct mips_arch_choice mips_arch_choices[] =
     mips_cp0sel_names_xlr, ARRAY_SIZE (mips_cp0sel_names_xlr),
     mips_cp1_names_mips3264, mips_hwr_names_numeric },
 
+  { "rsp",	1, bfd_mach_mips3000, CPU_R3000, ISA_MIPS1 | INSN_RSP, ASE_RSP,
+    mips_cp0_names_rsp, NULL, 0, mips_cp1_names_numeric,
+    mips_hwr_names_numeric },
+
   /* This entry, mips16, is here only for ISA/processor selection; do
      not print its name.  */
   { "",		1, bfd_mach_mips16, CPU_MIPS16, ISA_MIPS64,
@@ -900,6 +914,9 @@ set_default_mips_dis_options (struct disassemble_info *info)
 static bfd_boolean
 parse_mips_ase_option (const char *option)
 {
+
+  const struct mips_arch_choice *chosen_arch;
+
   if (CONST_STRNEQ (option, "msa"))
     {
       mips_ase |= ASE_MSA;
@@ -926,6 +943,26 @@ parse_mips_ase_option (const char *option)
     {
       mips_ase |= ASE_XPA;
       return TRUE;
+    }
+
+  if (CONST_STRNEQ (option, "rsp"))
+    {
+        mips_ase |= ASE_RSP;
+
+        /* XXX set all options here */
+        chosen_arch = choose_arch_by_name ("rsp", 3);
+        if (chosen_arch != NULL)
+  	    {
+          mips_processor = chosen_arch->processor;
+          mips_isa = chosen_arch->isa;
+          mips_cp0_names = chosen_arch->cp0_names;
+          mips_cp0sel_names = chosen_arch->cp0sel_names;
+          mips_cp0sel_names_len = chosen_arch->cp0sel_names_len;
+          mips_cp1_names = chosen_arch->cp1_names;
+          mips_hwr_names = chosen_arch->hwr_names;
+  	    }
+
+        return TRUE;
     }
 
   return FALSE;
@@ -1586,6 +1623,7 @@ print_insn_arg (struct disassemble_info *info,
       break;
 
     case OP_IMM_INDEX:
+    case OP_RSP_VECEL_LS:
       infprintf (is, "[%d]", uval);
       break;
 
@@ -1593,6 +1631,32 @@ print_insn_arg (struct disassemble_info *info,
       infprintf (is, "[");
       print_reg (info, opcode, OP_REG_GP, uval);
       infprintf (is, "]");
+      break;
+
+    case OP_RSP_VECEL:
+      {
+	unsigned int vsel;
+
+	vsel = uval >> 5;
+	uval &= 31;
+	print_reg (info, opcode, OP_REG_VEC, uval);
+	if (vsel & 8)
+	  {
+	    infprintf (is, "[%d]", vsel & 0x7);
+	  }
+	else if (vsel & 4)
+	  {
+	    infprintf (is, "[%dh]", vsel & 0x3);
+	  }
+	else if (vsel & 2)
+	  {
+	    infprintf (is, "[%dq]", vsel & 0x1);
+	  }
+	else if (vsel & 1)
+	  {
+	    infprintf (is, "[%d?]", vsel);
+	  }
+      }
       break;
     }
 }
@@ -1698,12 +1762,21 @@ validate_insn_args (const struct mips_opcode *opcode,
 		case OP_VU0_MATCH_SUFFIX:
 		case OP_IMM_INDEX:
 		case OP_REG_INDEX:
+		case OP_RSP_VECEL:
+		case OP_RSP_VECEL_LS:
+		  break;
+
 		case OP_SAVE_RESTORE_LIST:
 		  break;
 		}
 	    }
 	  if (*s == 'm' || *s == '+' || *s == '-')
-	    ++s;
+	    {
+	      if (*s == '-' && *(s+1) == 'o')
+		s += 2;
+	      else
+		++s;
+	    }
 	}
     }
   return TRUE;
@@ -1815,7 +1888,12 @@ print_insn_args (struct disassemble_info *info,
 			      mips_extract_operand (operand, insn));
 	    }
 	  if (*s == 'm' || *s == '+' || *s == '-')
-	    ++s;
+	    {
+	      if (*s == '-' && *(s+1) == 'o')
+		s += 2;
+	      else
+		++s;
+	    }
 	  break;
 	}
     }
@@ -2566,6 +2644,10 @@ with the -M switch (multiple options should be separated by commas):\n"));
   fprintf (stream, _("\n\
   xpa                      Recognize the eXtended Physical Address (XPA)\n\
                            ASE instructions.\n"));
+
+  fprintf (stream, _("\n\
+  rsp            Recognize the Nintendo 64 Reality Signal Procesor (RSP) vector\n\
+                 instructions.\n"));
 
   fprintf (stream, _("\n\
   gpr-names=ABI            Print GPR names according to specified ABI.\n\
